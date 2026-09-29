@@ -1,0 +1,77 @@
+#  微处理器与机器人 实验 —— 仓库忽略规则
+
+# ------------------------------------------------------------
+# 1. 不纳入本仓库的目录
+#    ws          = 临时工作区（Eclipse .metadata 等）
+#    _ioc_backup = CubeMX 备份
+#    experiment* = 实验报告（LaTeX）；星号保证 experiment5、experiment6
+#                  以及 experiment5_xxx 这类命名都会被自动忽略，
+#                  以后写新报告不需要再改本文件
+# ------------------------------------------------------------
+/ws/
+/_ioc_backup/
+/experiment*/
+
+# ------------------------------------------------------------
+# 2. 编译构建产物
+# ------------------------------------------------------------
+/build/
+/Debug/
+/Release/
+**/build/
+**/Debug/
+**/Release/
+*.o
+*.d
+*.su
+*.cyclo
+*.map
+*.list
+*.elf.*
+*.tmp
+
+# Keil / IAR / CubeMX 可能留下的中间文件（将来用得上就留着，用不上也无害）
+*.crf
+*.dep
+*.lnp
+*.iex
+*.sct
+*.htm
+*.ioc.bak
+
+# ------------------------------------------------------------
+# 3. 厂商资料
+# ------------------------------------------------------------
+*.chm
+
+# 体积过大的通用参考手册：可在原厂资料包里重新下载，
+# 为控制仓库体积（以及让首次推送能顺利完成）而排除。
+# guide/ 里其余较小的参考资料仍然正常纳入。
+/guide/STM32F429 阿波罗开发指南_V1.0.pdf
+
+# CMSIS 的例程/文档/组件：Makefile 与 CubeIDE 都不引用。
+# 编译真正需要的只有 Drivers/CMSIS/Include 与
+# Drivers/CMSIS/Device/ST/STM32F4xx/Include，这两个目录【没有】被忽略。
+**/Drivers/CMSIS/DSP/
+**/Drivers/CMSIS/Documentation/
+**/Drivers/CMSIS/DAP/
+**/Drivers/CMSIS/NN/
+**/Drivers/CMSIS/RTOS/
+**/Drivers/CMSIS/RTOS2/
+**/Drivers/CMSIS/CoreValidation/
+**/Drivers/CMSIS/Core/
+**/Drivers/CMSIS/Core_A/
+**/Drivers/STM32F4xx_HAL_Driver/Release_Notes.html
+
+# ------------------------------------------------------------
+# 4. 编辑器 / 系统 / 备份临时文件
+# ------------------------------------------------------------
+.settings/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.bak_*
+*.orig
+*.rej
