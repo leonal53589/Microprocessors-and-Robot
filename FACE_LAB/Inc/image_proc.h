@@ -43,7 +43,8 @@ extern "C" {
 #define COLOR_BINS          512U                         /* 8x8x8 RGB */
 #define COLOR_HIST_SUM      10000U
 
-/* 一张人脸图：RGB565 用于显示/存 Flash，gray 用于算法 */
+/* 全流程统一 R[15:11]/G[10:5]/B[4:0]，uint16_t 在 STM32 内存中为小端。
+ * 摄像头高字节先到的数据只在完整帧入口交换一次，裁剪/存储/显示不再交换。 */
 typedef struct
 {
   uint16_t rgb565[FACE_PIXELS];
@@ -59,6 +60,9 @@ typedef struct
 #define IMG_LOW_CONTRAST    3U
 
 /* ---- 预处理 ---- */
+
+/* 将高字节先到的 DMA 原始像素转换成 CPU/LTDC 使用的 RGB565 数值。 */
+void Image_RGB565SwapBytes(uint16_t *pixels, uint32_t count);
 
 /* 从整幅 RGB565 帧里按取景框裁剪并最近邻缩放成 48x48；0 = 成功 */
 uint8_t Image_CropToFace(const uint16_t *frame, uint16_t frame_w, uint16_t frame_h,

@@ -1,21 +1,21 @@
 /**
   ******************************************************************************
   * @file    main.c
-  * @brief   SMART_HOME —— STM32F429 智能家居中控终端（实验三）
+  * @brief   FACE_LAB —— STM32F429 人脸录入与识别（实验四）
   *
   *  板卡：正点原子阿波罗 V2 STM32F429（STM32F429IGTx）+ DNF429-EB 实验箱
-  *  外设：7 寸 800x480 RGB 屏（LTDC + SDRAM 帧缓冲）
-  *        DHT11 温湿度（PB12 单总线）           —— 开发指南第 45 章
-  *        电子电压表（RV1 -> PA5/ADC1_IN5）     —— 第 32 章
-  *        OV5640 摄像头（P6，DCMI + DMA）       —— 第 50 章
-  *        板载双色 LED（PB0 绿 / PB1 红）与 4 个按键
+  *  外接：7 寸 1024x600 RGB 屏（800x480 界面居中）（RGBLCD 接口，LTDC + SDRAM 帧缓冲）
+  *        ATK-OV5640 摄像头（P6，DCMI + DMA 实时预览与抓拍）—— 开发指南第 50 章
+  *  板载：W25Q256 SPI NOR Flash（SPI5：PF6~PF9，人脸库持久化）
+  *        W9825G6KH SDRAM（帧缓冲 / 人脸图库 / 特征 / PCA 模型都在这里）
+  *        双色 LED（PB0 绿=识别通过 / PB1 红=不通过）+ 4 个按键
   *
   *  时钟：HSE 25MHz -> PLL(25/360/2) -> SYSCLK 180MHz
   *        HCLK 180MHz / APB1 45MHz / APB2 90MHz / SDRAM 90MHz
-  *        LTDC 像素时钟 = PLLSAI(1MHz x 240 / 4) / 2 = 30MHz
+  *        LTDC 像素时钟 = PLLSAI(1MHz x 360 / 2) / 4 = 45MHz
   *
-  *  主循环里只有 App_Task()，所有采集/显示/报警都是按时间戳调度的，
-  *  没有任何 while 等待，保证按键和摄像头预览不会被"卡住"。
+  *  主循环里只有 App_Task()：摄像头逐帧采集、按键、界面刷新都按时间戳调度，
+  *  没有任何 while 等待，所以预览不卡、按键始终跟手。
   ******************************************************************************
   */
 
@@ -48,7 +48,7 @@ int main(void)
 /**
   * @brief System Clock Configuration
   *        HSE 25MHz, PLLM=25, PLLN=360, PLLP=2 -> SYSCLK 180MHz
-  *        注意 LTDC 的 PLLSAI 在 bsp_lcd.c 里单独配置（30MHz 像素时钟）
+  *        注意 LTDC 的 PLLSAI 在 bsp_lcd.c 里单独配置（45MHz 像素时钟）
   * @retval None
   */
 void SystemClock_Config(void)
@@ -86,7 +86,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;    /* HCLK  = 180MHz */
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;      /* APB1  = 45MHz  */
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;      /* APB2  = 90MHz  */
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;      /* APB2  = 90MHz  */
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {

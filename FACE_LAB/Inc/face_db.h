@@ -43,6 +43,9 @@ extern "C" {
 #define FACE_FLASH_MAGIC_REC    0x43455246U            /* 'F','R','E','C' */
 #define FACE_FLASH_MAGIC_HDR    0x31424446U            /* 'F','D','B','1' */
 #define FACE_FLASH_VERSION      1U
+/* flags=0: 旧工程的 DMA 原始字节序 + 旧 CRC；读回时在 RAM 中转正并重算灰度。
+ * flags=1: 标准 RGB565（小端存储）+ 标准 CRC32。不会自动擦写旧记录。 */
+#define FACE_FLASH_FLAG_RGB565  0x01U
 
 /* 一条图库记录（放 SDRAM，约 6.9KB） */
 typedef struct

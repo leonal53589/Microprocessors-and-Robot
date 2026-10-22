@@ -106,6 +106,10 @@ static uint8_t    s_cam_ready;
 static uint8_t    s_cam_fail;
 static uint8_t    s_cam_streaming;
 static uint32_t   s_cam_start_ms;
+static uint32_t   s_cam_last_good_ms;
+static uint32_t   s_cap_start_ms;
+static uint8_t    s_dcmi_ready;
+static const char *s_cam_error = "等待摄像头";
 static uint32_t   s_cam_frames;
 static uint32_t   s_t_fps;
 static uint32_t   s_fps_frames;
@@ -124,6 +128,7 @@ static uint32_t   s_recog_ms;
 
 static void app_take_result(void);
 static void ui_live_refresh(void);
+static void screen_enter(AppScreen sc);
 
 /* ==========================================================================
  * 小工具
@@ -230,30 +235,71 @@ static void led_show_verdict(uint8_t pass)
 /* ==========================================================================
  * 摄像头
  * ========================================================================== */
+static void cam_fail(const char *reason)
+{
+  if (s_dcmi_ready != 0U) { BSP_DCMI_Stop(); }
+  s_cam_streaming = 0U;
+  s_cam_ready = 0U;
+  s_cap_req = CAP_NONE;
+  s_cam_error = reason;
+  msg_set(reason);
+}
+
 static void cam_start_frame(void)
 {
-  if (BSP_DCMI_StartFrame((uint16_t *)CAM_FB_ADDR, (320U * 240U * 2U) / 4U) == 0U)
+  if ((s_screen != SCREEN_LIVE) || (s_cam_ready == 0U) ||
+      (s_cam_streaming != 0U)) { return; }
+
+  if (BSP_DCMI_StartFrame((uint16_t *)CAM_FB_ADDR, CAM_FB_BYTES / 4U) == 0U)
   {
     s_cam_streaming = 1U;
     s_cam_start_ms = HAL_GetTick();
   }
   else
   {
-    s_cam_streaming = 0U;
+    cam_fail("采集启动失败");
   }
 }
 
 static uint8_t cam_init(void)
 {
-  if (OV5640_Init() != OV5640_OK)
+  OV5640_Status st;
+
+  if (s_dcmi_ready != 0U) { BSP_DCMI_Stop(); }
+  s_cam_streaming = 0U;
+  s_cam_ready = 0U;
+  s_cap_req = CAP_NONE;
+  if (BSP_DCMI_Init() != 0U)
   {
-    s_cam_ready = 0U;
+    s_dcmi_ready = 0U;
+    s_cam_error = "DCMI初始化失败";
+    msg_set(s_cam_error);
+    return 1U;
+  }
+  s_dcmi_ready = 1U;
+
+  st = OV5640_Init();
+  if (st != OV5640_OK)
+  {
+    s_cam_error = (st == OV5640_ERR_SCCB) ? "SCCB无应答" :
+                  (st == OV5640_ERR_ID) ? "ID不匹配" :
+                  (st == OV5640_ERR_VERIFY) ? "寄存器校验失败" : "摄像头初始化失败";
+    msg_set(s_cam_error);
     return 1U;
   }
   s_cam_ready = 1U;
   s_cam_fail = 0U;
-  cam_start_frame();
-  return 0U;
+  s_cam_error = "等待完整帧";
+  s_cam_last_good_ms = HAL_GetTick();
+  return 0U;  /* 页面绘制和建模完成后才启动第一帧。 */
+}
+
+static void cam_request(CaptureReq req)
+{
+  if ((s_cam_ready == 0U) || (s_cam_streaming == 0U)) { return; }
+  s_cap_req = req;
+  s_cap_start_ms = HAL_GetTick();
+  msg_set("正在抓拍");
 }
 
 /* 取景框：把裁剪区画到 2 倍预览上 */
@@ -282,10 +328,17 @@ static void ui_draw_viewfinder(void)
 /* 一帧搬完：显示 + 处理待处理的抓拍请求 */
 static void cam_on_frame(uint32_t now)
 {
-  BSP_LCD_BlitRGB565x2(0U, 0U, 320U, 240U, (const uint16_t *)CAM_FB_ADDR);
+#if CFG_CAM_BYTE_SWAP
+  /* 同一张完整帧先统一字节序，预览、裁剪、灰度和颜色特征共用它。 */
+  Image_RGB565SwapBytes((uint16_t *)CAM_FB_ADDR, OV5640_WIDTH * OV5640_HEIGHT);
+#endif
+  s_cam_last_good_ms = now;
 
+  /* 只有实时预览画面上才把相机图贴到屏幕。
+   * 否则识别结果/统计/信息界面会被每帧预览覆盖掉（表现为"结果被相机画面遮挡"）。 */
   if (s_screen == SCREEN_LIVE)
   {
+    BSP_LCD_BlitRGB565x2(0U, 0U, 320U, 240U, (const uint16_t *)CAM_FB_ADDR);
     ui_draw_viewfinder();
   }
 
@@ -295,7 +348,7 @@ static void cam_on_frame(uint32_t now)
 
   if ((now - s_t_fps) >= 1000U)
   {
-    s_fps_x10 = s_fps_frames * 10U;
+    s_fps_x10 = (s_fps_frames * 10000U) / (now - s_t_fps);
     s_fps_frames = 0U;
     s_t_fps = now;
   }
@@ -320,6 +373,7 @@ static void cam_on_frame(uint32_t now)
       return;                       /* 画质不合格：不存、不识别，提示重拍 */
     }
 
+    s_has_result = 1U;  /* 录入模式也回显这次通过质量检查的彩色照片。 */
     if (req == CAP_ENROLL)
     {
       uint32_t t0 = HAL_GetTick();
@@ -354,33 +408,41 @@ static void cam_on_frame(uint32_t now)
 
 static void cam_task(uint32_t now)
 {
-  if (s_cam_ready == 0U)
+  if ((s_screen != SCREEN_LIVE) || (s_cam_ready == 0U)) { return; }
+
+  if ((s_cap_req != CAP_NONE) && ((now - s_cap_start_ms) > CFG_CAPTURE_TIMEOUT_MS))
   {
-    return;
+    s_cap_req = CAP_NONE;
+    msg_set("抓拍超时请重拍");
+    ui_live_refresh();
   }
 
-  if (BSP_DCMI_TakeFrame() != 0U)
+  if ((BSP_DCMI_HasError() == 0U) && (BSP_DCMI_TakeFrame() != 0U))
   {
+    s_cam_streaming = 0U;
     cam_on_frame(now);
+    /* 识别完成会进入结果页；只有实时页才继续采集。 */
     cam_start_frame();
     return;
   }
 
-  if ((s_cam_streaming != 0U) && ((now - s_cam_start_ms) > CFG_CAM_TIMEOUT_MS))
+  if ((s_cam_streaming != 0U) &&
+      ((BSP_DCMI_HasError() != 0U) || ((now - s_cam_start_ms) > CFG_CAM_TIMEOUT_MS)))
   {
-    s_cam_fail++;
-    if (s_cam_fail >= CFG_CAM_FAIL_LIMIT)
+    s_cam_streaming = 0U;
+    if (s_cam_fail < 0xFFU) { s_cam_fail++; }
+    if (BSP_DCMI_HasError() == 0U) { BSP_DCMI_RecordTimeout(); }
+    if ((now - s_cam_last_good_ms) >= CFG_CAM_STALE_MS)
     {
-      BSP_DCMI_Stop();
-      s_cam_ready = 0U;
-      msg_set("摄像头无信号，按K0重试");
-      if (s_screen == SCREEN_LIVE)
-      {
-        ui_live_refresh();
-      }
+      cam_fail((BSP_DCMI_LastFaultCode() == BSP_DCMI_FAULT_FRAME_TIMEOUT)
+               ? "帧超时K0重试" : "采集错误K0重试");
+      ui_live_refresh();
     }
     else
     {
+      /* 与实验三一致：错误帧不显示、不存入图库，保留上一完整画面。 */
+      BSP_DCMI_Stop();
+      BSP_DCMI_ClearError();
       cam_start_frame();
     }
   }
@@ -415,7 +477,7 @@ static void app_take_result(void)
     led_show_verdict(s_res[s_sel].pass);
   }
 
-  s_screen = SCREEN_RESULT;
+  screen_enter(SCREEN_RESULT);
 }
 
 /* ==========================================================================
@@ -493,7 +555,13 @@ static void ui_live_refresh(void)
   }
   else
   {
-    BSP_LCD_DrawString(x, y, "无信号", COLOR_BAD, COLOR_TOP, LCD_FONT_SMALL);
+    BSP_LCD_DrawString(x, y, "故障", COLOR_BAD, COLOR_TOP, LCD_FONT_SMALL);
+    if ((s_dcmi_ready != 0U) && (BSP_DCMI_LastFaultCode() != BSP_DCMI_FAULT_NONE))
+    {
+      BSP_LCD_DrawString((uint16_t)(x + 60U), y, "E", COLOR_BAD, COLOR_TOP, LCD_FONT_SMALL);
+      (void)BSP_LCD_DrawInt((uint16_t)(x + 72U), y, BSP_DCMI_LastFaultCode(),
+                            COLOR_BAD, COLOR_TOP, LCD_FONT_SMALL);
+    }
   }
 
   y = 350U;
@@ -849,20 +917,25 @@ static void ui_info_screen(void)
  * ========================================================================== */
 static void screen_enter(AppScreen sc)
 {
+  /* 切换页面时取消旧抓拍请求并停止 DMA，避免跨模式保存或覆盖结果页。 */
+  if (s_dcmi_ready != 0U) { BSP_DCMI_Stop(); }
+  s_cam_streaming = 0U;
+  s_cap_req = CAP_NONE;
   s_screen = sc;
 
   if (sc == SCREEN_LIVE)
   {
+    BSP_LCD_FillRect(0U, 0U, VIEW_W, LCD_HEIGHT, COLOR_BG);
+    s_cam_last_good_ms = HAL_GetTick();
+    s_t_fps = s_cam_last_good_ms;
+    s_fps_frames = 0U;
+    s_fps_x10 = 0U;
+    ui_draw_viewfinder();
     ui_live_refresh();
-    if (s_cam_ready != 0U)
-    {
-      cam_start_frame();
-    }
+    cam_start_frame();
   }
   else
   {
-    BSP_DCMI_Stop();
-    s_cam_streaming = 0U;
     if (sc == SCREEN_RESULT)
     {
       ui_result_screen();
@@ -923,8 +996,7 @@ static void key_task(uint32_t now)
       screen_enter(SCREEN_LIVE);
       if (ev == KEY_EVENT_K0)
       {
-        s_cap_req = CAP_RECOG;
-        msg_set("正在重新抓拍");
+        cam_request(CAP_RECOG);
         ui_live_refresh();
       }
       return;
@@ -1036,12 +1108,15 @@ static void key_task(uint32_t now)
   {
     if (s_cam_ready == 0U)
     {
-      msg_set((cam_init() == 0U) ? "摄像头已重新初始化" : "摄像头初始化失败");
+      if (cam_init() == 0U)
+      {
+        msg_set("摄像头已重新初始化");
+        cam_start_frame();
+      }
     }
     else
     {
-      s_cap_req = (s_mode == MODE_ENROLL) ? CAP_ENROLL : CAP_RECOG;
-      msg_set("正在抓拍");
+      cam_request((s_mode == MODE_ENROLL) ? CAP_ENROLL : CAP_RECOG);
     }
     ui_live_refresh();
   }
@@ -1121,15 +1196,8 @@ void App_Init(void)
 
   BSP_DelayMs(150U);
 
-  /* DCMI + 摄像头 */
-  if (BSP_DCMI_Init() != 0U)
-  {
-    BSP_LCD_DrawStringCentered(300U, "DCMI 初始化失败", COLOR_BAD, COLOR_BG, LCD_FONT_SMALL);
-  }
-  else
-  {
-    (void)cam_init();
-  }
+  /* 初始化后先完成建模和界面绘制，再由实时页启动第一帧。 */
+  (void)cam_init();
 
   /* 图库已有样本就直接建模，省得每次上电都手动重建 */
   FaceAlgo_Bind(&s_db);
@@ -1141,7 +1209,7 @@ void App_Init(void)
   BSP_DelayMs(300U);
 
   app_enter_mode(MODE_ENROLL);
-  msg_set("K0拍照录入 K2换模式");
+  msg_set((s_cam_ready != 0U) ? "K0拍照录入 K2换模式" : s_cam_error);
   ui_live_refresh();
 
   {
@@ -1159,11 +1227,13 @@ void App_Task(void)
 
   cam_task(now);
 
+  now = HAL_GetTick();  /* 裁剪、Flash 写入和建模后更新时间，避免旧时间回绕。 */
   if ((now - s_t_key) >= CFG_KEY_PERIOD_MS)
   {
     key_task(now);
   }
 
+  now = HAL_GetTick();  /* K0 重初始化也可能耗时。 */
   if ((now - s_t_ui) >= CFG_UI_PERIOD_MS)
   {
     s_t_ui = now;

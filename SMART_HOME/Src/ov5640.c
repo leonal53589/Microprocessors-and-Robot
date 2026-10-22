@@ -352,10 +352,175 @@ static uint32_t ov5640_pin_pos(uint16_t pin)
   return pos;
 }
 
+/* ==========================================================================
+ *  摄像头 PWDN 释放（PCF8574 @ PH4=SCL / PH5=SDA）
+ *
+ *  依据（均为官方文档原文，不做任何试探）：
+ *    - 《阿波罗V2 硬件参考手册》2.1.23："如果是摄像头模块，则需要用到全部引脚
+ *      ……DCMI_PWDN 则连接在 PCF8574（IIC IO 扩展芯片）的 P2 引脚上。"
+ *    - 《阿波罗STM32F429 开发指南》第 37 章："开发板上 A0~A2 都是接 GND 的，
+ *      所以 PCF8574T 的地址为 0X40（左移了一位）"；官方驱动开机先写 0xFF，
+ *      "默认情况下所有 IO 输出高电平"。
+ *    - OV5640 的 PWDN 高电平有效（高 = 掉电）。因此不主动把 P2 清 0，
+ *      摄像头会一直处于掉电态，SCCB 永远不会应答。
+ *
+ *  写入值 = 0xFF & ~P2 = 0xFB：只清 P2，其余位保持高（BEEP/ETH_RESET 等无效态）。
+ * ========================================================================== */
+static uint32_t s_pwdn_sda_pos = 0U;
+
+static void pwdn_delay(void)
+{
+  BSP_DelayUs(4U);                 /* 约 125kHz，IIC 上限 400kHz */
+}
+
+static void pwdn_scl(uint8_t level)
+{
+  HAL_GPIO_WritePin(PCF8574_SCL_PORT, PCF8574_SCL_PIN,
+                    (level != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void pwdn_sda_dir_out(void)
+{
+  PCF8574_SDA_PORT->MODER = (PCF8574_SDA_PORT->MODER & ~(3UL << (s_pwdn_sda_pos * 2U)))
+                          | (1UL << (s_pwdn_sda_pos * 2U));
+}
+
+static void pwdn_sda_dir_in(void)
+{
+  PCF8574_SDA_PORT->MODER = PCF8574_SDA_PORT->MODER & ~(3UL << (s_pwdn_sda_pos * 2U));
+  PCF8574_SDA_PORT->PUPDR = (PCF8574_SDA_PORT->PUPDR & ~(3UL << (s_pwdn_sda_pos * 2U)))
+                          | (1UL << (s_pwdn_sda_pos * 2U));
+}
+
+static void pwdn_sda_out(uint8_t level)
+{
+  pwdn_sda_dir_out();
+  HAL_GPIO_WritePin(PCF8574_SDA_PORT, PCF8574_SDA_PIN,
+                    (level != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static uint8_t pwdn_sda_in(void)
+{
+  pwdn_sda_dir_in();
+  pwdn_delay();
+  return (HAL_GPIO_ReadPin(PCF8574_SDA_PORT, PCF8574_SDA_PIN) == GPIO_PIN_SET) ? 1U : 0U;
+}
+
+static void pwdn_start(void)
+{
+  pwdn_sda_out(1U);
+  pwdn_scl(1U);
+  pwdn_delay();
+  pwdn_sda_out(0U);
+  pwdn_delay();
+  pwdn_scl(0U);
+  pwdn_delay();
+}
+
+static void pwdn_stop(void)
+{
+  pwdn_sda_out(0U);
+  pwdn_delay();
+  pwdn_scl(1U);
+  pwdn_delay();
+  pwdn_sda_out(1U);
+  pwdn_delay();
+}
+
+/** 写 1 字节，返回 1 = 从机应答(ACK) */
+static uint8_t pwdn_write_byte(uint8_t byte)
+{
+  uint8_t i;
+  uint8_t ack;
+
+  pwdn_sda_dir_out();
+  for (i = 0U; i < 8U; i++)
+  {
+    pwdn_sda_out(((byte & 0x80U) != 0U) ? 1U : 0U);
+    pwdn_delay();
+    pwdn_scl(1U);
+    pwdn_delay();
+    pwdn_scl(0U);
+    pwdn_delay();
+    byte = (uint8_t)(byte << 1);
+  }
+  (void)pwdn_sda_in();             /* 第九个时钟前先释放 SDA */
+  pwdn_scl(1U);
+  pwdn_delay();
+  ack = (pwdn_sda_in() == 0U) ? 1U : 0U;   /* SCL 高电平期间采样 ACK */
+  pwdn_scl(0U);
+  pwdn_delay();
+  return ack;
+}
+
+/** 通过 PCF8574 释放摄像头 PWDN；返回 1 = 两字节都被应答 */
+static uint8_t ov5640_pwdn_release(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  uint8_t ack;
+
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  s_pwdn_sda_pos = ov5640_pin_pos(PCF8574_SDA_PIN);
+
+  gpio.Mode  = GPIO_MODE_OUTPUT_OD;
+  gpio.Pull  = GPIO_PULLUP;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+
+  gpio.Pin = PCF8574_SCL_PIN;
+  HAL_GPIO_Init(PCF8574_SCL_PORT, &gpio);
+  gpio.Pin = PCF8574_SDA_PIN;
+  HAL_GPIO_Init(PCF8574_SDA_PORT, &gpio);
+
+  pwdn_scl(1U);
+  pwdn_sda_out(1U);
+  BSP_DelayUs(20U);
+
+  pwdn_start();
+  ack  = pwdn_write_byte((uint8_t)PCF8574_ADDR_W);
+  ack &= pwdn_write_byte((uint8_t)(0xFFU & ~PCF8574_PWDN_BIT));
+  pwdn_stop();
+
+  BSP_DelayMs(5U);                 /* 等模块内部上电稳定 */
+  return ack;
+}
+
+/**
+  * @brief  给摄像头提供 XCLK：PA8 复用为 MCO1，输出 HSE(25MHz)
+  *
+  *  官方《阿波罗V2 硬件参考手册》2.1.23："如果是摄像头模块，则需要用到全部引脚"，
+  *  其中 DCMI_XCLK 接在 PA8 上。本实验箱这块 ATK-OV5640 不带晶振，必须由 MCU 提供
+  *  工作时钟：没有 XCLK 时 SCCB 照样能读能写（I2C 从机靠 SCL 工作），但传感器内部
+  *  PLL 锁不住，一个 PCLK 都不输出 —— 表现为"初始化成功、却始终无信号"。
+  *  HSE = 25MHz，OV5640 允许 6~27MHz。
+  */
+static void ov5640_xclk_init(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  gpio.Pin       = OV5640_XCLK_PIN;
+  gpio.Mode      = GPIO_MODE_AF_PP;
+  gpio.Pull      = GPIO_NOPULL;
+  gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+  gpio.Alternate = OV5640_XCLK_AF;          /* AF0 = MCO1 */
+  HAL_GPIO_Init(OV5640_XCLK_PORT, &gpio);
+
+  /* MCO1 = HSE(25MHz)：直接写 CFGR 的 MCO1SEL(bits[22:21])=HSE、MCO1PRE(bits[26:24])=/1。
+   * 不用 HAL 宏：实测 __HAL_RCC_MCO1_CONFIG 没能把源切到 HSE，PA8 上出的是默认 HSI 16MHz
+   * （也能跑，但本驱动的 PLL 参数是按 24MHz 标定的，用 25MHz 更接近）。 */
+  RCC->CFGR = (RCC->CFGR & ~(RCC_CFGR_MCO1 | RCC_CFGR_MCO1PRE)) | RCC_MCO1SOURCE_HSE | RCC_MCO_DIV1;
+  BSP_DelayMs(5U);                          /* 等时钟稳定 */
+}
+
 /** SCCB 两个引脚初始化：都是开漏输出（靠板上 4.7K 上拉；内部上拉只作兜底） */
 static void ov5640_gpio_init(void)
 {
   GPIO_InitTypeDef gpio = {0};
+
+  /* 顺序按 OV5640 上电时序：先释放 PWDN 让模块上电 -> 再送 XCLK -> 最后配 SCCB 引脚 */
+  (void)ov5640_pwdn_release();
+  ov5640_xclk_init();
 
   /* PA15 = 复位，PB3/PB4 = SDA/SCL，两个端口的时钟都要开 */
   __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -392,7 +557,8 @@ static void ov5640_hw_reset(void)
   HAL_GPIO_WritePin(OV5640_RST_PORT, OV5640_RST_PIN, GPIO_PIN_RESET);  /* 低电平复位 */
   BSP_DelayMs(10U);                                                   /* 手册要求 >=5ms */
   HAL_GPIO_WritePin(OV5640_RST_PORT, OV5640_RST_PIN, GPIO_PIN_SET);   /* 释放复位 */
-  BSP_DelayMs(30U);                                                   /* 手册要求 >=20ms */
+  BSP_DelayMs(100U);                                                  /* 手册要求 >=20ms；
+                                                                         有 XCLK 时传感器要跑内部初始化，留足 100ms */
 }
 
 static uint8_t s_ready = 0U;      /* 1 = OV5640_Init() 曾经成功过 */
@@ -418,6 +584,7 @@ static const Ov5640Reg ov5640_rgb565_qvga[] = {
   {0x3008, 0x82},   /* bit[7]=1 软复位：所有寄存器回默认值 */
   {0xFFFF, 10},     /* 等软复位完成 */
   {0x3008, 0x42},   /* bit[6]=1 软件掉电：配置期间不出图 */
+  {0x3103, 0x03},   /* 软复位后重新选择 PLL 系统时钟 */
   {0x3017, 0xff},   /* DVP 输出引脚使能：VSYNC/HREF/PCLK/D[9:7] */
   {0x3018, 0xff},   /* DVP 输出引脚使能：D[5:0] */
   {0x302c, 0xc3},   /* 输出驱动能力 4x（bit[7:6]=11），排线长也不怕 */
@@ -440,6 +607,8 @@ static const Ov5640Reg ov5640_rgb565_qvga[] = {
   {0x3002, 0x1c},   /* 复位 JFIFO / SFIFO / JPEG */
   {0x3004, 0xff},   /* 时钟全开 */
   {0x3006, 0xc3},   /* 关掉 JPEG2X / JPEG 时钟（DVP 直出用不到） */
+  {0x300e, 0x58},   /* DVP 并口模式，关闭 MIPI 通路 */
+  {0x302e, 0x00},
 
   /* ---- 4. ISP 顶层开关  [B] ---- */
   {0x5000, 0xa7},   /* LENC + gamma + BPC + WPC + CIP 全开 */
@@ -638,11 +807,12 @@ static const Ov5640Reg ov5640_rgb565_qvga[] = {
   /* ---- 14. 输出格式：RGB565 + DVP 细节  [B] + [A] ---- */
   {0x4711, 0x00},   /* DVP 控制寄存器：本序列不用它，显式写回默认 0，
                        保证从 JPEG 模式切回来时状态干净 */
-  {0x4300, 0x61},   /* 格式控制 00：bit[7:4]=0110 -> RGB565，bit[3:0]=1 -> BGR */
+  {0x4300, 0x61},   /* RGB565 高字节先输出；app.c 交换字节后交给 LTDC */
   {0x501f, 0x01},   /* ISP 输出格式选择：001 = RGB（RGB565 必须写 0x01） */
   {0x503d, 0x00},   /* 关闭测试彩条/测试图案 */
 
   /* ---- 15. 结束：退出软件掉电，开始出图  [B] ---- */
+  {0x3000, 0x00},   /* 释放前面保持的内部复位 */
   {0x3008, 0x02},   /* bit6=0 退出软件掉电 -> 开始输出 DVP 数据流 */
   {0xFFFF, 200},    /* 给 AEC/AWB 一点收敛时间，第一帧才不会是黑的 */
 };
@@ -712,6 +882,9 @@ OV5640_Status OV5640_Probe(uint16_t *pid)
   *  可重复调用（幂等）：每次都会重新硬件复位 + 重新写整张表，失败后可以再调一次。
   *  任何一步失败都会返回错误码并清掉“就绪”标志。
   */
+/* 调试用：OV5640_Init() 末尾回读的关键寄存器，供调试器查看（见函数内注释） */
+volatile uint8_t g_ov5640_verify[4];
+
 OV5640_Status OV5640_Init(void)
 {
   uint16_t pid = 0U;
@@ -725,6 +898,12 @@ OV5640_Status OV5640_Init(void)
   st = OV5640_Probe(&pid);
   if (st != OV5640_OK)
   {
+    BSP_DelayMs(50U);             /* 有 XCLK 时传感器内部初始化更慢，再给一次机会 */
+    ov5640_hw_reset();
+    st = OV5640_Probe(&pid);
+  }
+  if (st != OV5640_OK)
+  {
     return st;                    /* OV5640_ERR_SCCB 或 OV5640_ERR_ID */
   }
 
@@ -732,6 +911,25 @@ OV5640_Status OV5640_Init(void)
   if (st != OV5640_OK)
   {
     return st;
+  }
+
+  /* 回读核对：SCCB 只要从机应答就算"写成功"，若寄存器地址/写序列有问题，
+   * 整表写完也不会报错，但传感器实际仍停在掉电态（表现为完全没有 PCLK）。
+   * 这里读回 4 个关键寄存器与写入值比对，结果放在 g_ov5640_verify 里供调试器查看：
+   *   期望  [0]0x3035=0x41  [1]0x3017=0xFF  [2]0x3018=0xFF  [3]0x5001=0xA3 */
+  {
+    static const Ov5640Reg checks[] = {
+      {0x3035, 0x41}, {0x3017, 0xff}, {0x3018, 0xff}, {0x5001, 0xa3},
+      {0x3008, 0x02}, {0x3103, 0x03}, {0x300e, 0x58}, {0x4740, 0x21}
+    };
+    for (uint32_t i = 0U; i < sizeof(checks) / sizeof(checks[0]); i++)
+    {
+      uint8_t value = 0U;
+      st = OV5640_ReadReg(checks[i].reg, &value);
+      if (i < 4U) { g_ov5640_verify[i] = value; }
+      if (st != OV5640_OK) { return st; }
+      if (value != checks[i].val) { return OV5640_ERR_VERIFY; }
+    }
   }
 
   s_ready = 1U;

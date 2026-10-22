@@ -5,7 +5,7 @@
   *
   *  板卡：正点原子阿波罗 V2 STM32F429（STM32F429IGTx, LQFP176）
   *        配套 DNF429-EB 嵌入式学习实验箱
-  *        外接：7 寸 800x480 RGB 屏（RGBLCD 接口）+ ATK-OV5640（P6 摄像头接口）
+  *        外接：7 寸 RGB 屏（面板 1024x600，界面 800x480 居中；RGBLCD 接口）+ ATK-OV5640（P6 摄像头接口）
   *
   *  依据：《阿波罗V2 STM32F429开发板IO引脚分配表》（guide 目录，逐脚核对）
   *        《阿波罗V2 硬件参考手册》《STM32F429 阿波罗开发指南》
@@ -58,7 +58,7 @@ extern "C" {
 #define LED_OFF_LEVEL   GPIO_PIN_SET
 
 /* ==========================================================================
- * 1. 7 寸 800x480 RGB 屏：LTDC 引脚
+ * 1. 7 寸 RGB 屏（面板 1024x600，界面 800x480 居中）：LTDC 引脚
  *    IO 分配表"RGBLCD接口"列 + 数据手册 AF14(LTDC)
  *
  *    注意低 3 位（R0~R2、G0~G1、B0~B2）板上没有引出：面板只接了高 5/6/5 位，
@@ -118,26 +118,34 @@ extern "C" {
 #define LCD_BL_ON       GPIO_PIN_SET
 #define LCD_BL_OFF      GPIO_PIN_RESET
 
-/* 800x480 面板时序（水平/垂直同步宽度、前后沿）与 LTDC 时钟
- * 面板给出典型像素时钟 30MHz；如换屏只需改这一组宏。
- *   行总长 = 800 + 48 + 88 + 40 = 976
- *   场总长 = 480 +  3 + 32 + 13 = 528
- *   帧率   = 30MHz / (976*528) ≈ 58.2Hz
- */
-#define LCD_WIDTH               800U
-#define LCD_HEIGHT              480U
-#define LCD_HSW                 48U
-#define LCD_HBP                 88U
-#define LCD_HFP                 40U
+#define LCD_WIDTH               800U     /* 帧缓冲/界面宽度（保持不变） */
+#define LCD_HEIGHT              480U     /* 帧缓冲/界面高度（保持不变） */
+/* 面板原生分辨率：由屏模块的 ID 引脚实测得到（R7/G7/B7，内部上拉与内部下拉两种读法结果一致）
+ *   M2 M1 M0 = 0 1 0  ->  0x7016  =  **7 寸 1024x600**
+ * 官方参数（《开发指南》第 26 章 ltdcid == 0X7016 分支）：
+ *   hsw=20  hbp=140  hfp=160  vsw=3  vbp=20  vfp=12
+ *   像素时钟 ltdc_clk_set(360, 2, RCC_PLLSAIDIVR_4) = 360/2/4 = 45MHz
+ * 总尺寸 = 20+140+1024+160 = 1344 列，3+20+600+12 = 635 行 -> 约 52.8Hz
+ * 注意：本工程界面仍按 800x480 绘制，靠 LTDC 图层窗口居中显示在 1024x600 面板上。 */
+#define LCD_PANEL_W             1024U
+#define LCD_PANEL_H             600U
+#define LCD_HSW                 20U
+#define LCD_HBP                 140U
+#define LCD_HFP                 160U
 #define LCD_VSW                 3U
-#define LCD_VBP                 32U
-#define LCD_VFP                 13U
-/* PLLSAI: HSE/PLLM = 1MHz 输入, VCO = 1MHz * 240 = 240MHz,
- *         /PLLSAIR(4) = 60MHz, 再 /PLLSAIDivR(2) = 30MHz 作为 LTDC 时钟 */
-#define LCD_PLLSAI_N            240U
-#define LCD_PLLSAI_R            4U
+#define LCD_VBP                 20U
+#define LCD_VFP                 12U
+/* 居中窗口：左上角 = ((1024-800)/2, (600-480)/2) = (112, 60) */
+#define LCD_WIN_X0              112U
+#define LCD_WIN_Y0              60U
+#define LCD_WIN_X1              (LCD_WIN_X0 + LCD_WIDTH - 1U)
+#define LCD_WIN_Y1              (LCD_WIN_Y0 + LCD_HEIGHT - 1U)
+/* PLLSAI 像素时钟：1MHz x 360 / 2 = 180MHz，再经 DIVR(/4) = 45MHz
+ * （对应官方 ltdc_clk_set(360, 2, RCC_PLLSAIDIVR_4)，用于 1024x600 面板） */
+#define LCD_PLLSAI_N            360U
+#define LCD_PLLSAI_R            2U
 #define LCD_PLLSAI_Q            8U
-#define LCD_PLLSAIDIVR          RCC_PLLSAIDIVR_2
+#define LCD_PLLSAIDIVR          RCC_PLLSAIDIVR_4
 
 /* ==========================================================================
  * 2. 外部 SDRAM：FMC 引脚（W9825G6KH，32MB，16 位，4 Bank x 13 行 x 9 列）
@@ -276,15 +284,25 @@ extern "C" {
  * 6. 摄像头 OV5640：P6（OLED/CAMERA 接口）
  *    DCMI 引脚用 AF13，SCCB 用软件模拟（板上 PB3/PB4 已有 4.7K 上拉）
  *
- *    ★ 与实验一/二的资源冲突说明：
+ *    与实验一/二的资源冲突说明：
  *      实验一/二用 P6 插 SSD1306 OLED（8080 并口），占用的正是 DCMI 的
  *      PB7/PB4/PH8/PB3/PA15 和数据线；本实验改用 7 寸 RGB 屏之后 P6 空出来
  *      专门给摄像头，两者不再冲突。
- *    ★ PA8(DCMI_XCLK) 不驱动：ATK-OV5640 模块自带 24MHz 有源晶振；
- *      而且 IO 分配表明确写着 PA8 同时接 LF0038 红外接收头并有 4.7K 上拉，
- *      "不建议做普通 IO 使用"，所以本工程不碰它。
+ *    PA8(DCMI_XCLK)：**必须由 MCU 提供工作时钟**。官方《阿波罗V2 硬件参考手册》
+ *      2.1.23 写明"如果是摄像头模块，则需要用到全部引脚"，而 DCMI_XCLK 就接在 PA8 上。
+ *      本实验箱这块 ATK-OV5640 不带晶振：实测没有 XCLK 时 SCCB 照样能读能写
+ *      （I2C 从机靠 SCL 工作），但传感器内部 PLL 锁不住、一个 PCLK 都不输出 ——
+ *      表现为"初始化成功、却始终显示无信号"。
+ *      做法：PA8 复用为 MCO1，输出 HSE(25MHz)（OV5640 允许 6~27MHz）。
+ *      该脚同时接 LF0038 红外接收头（开漏输出 + 4.7K 上拉），本实验用不到红外，
+ *      推挽驱动不会与之冲突。
  * ========================================================================== */
 #define DCMI_AF                 GPIO_AF13_DCMI
+
+/* 摄像头 XCLK：PA8 = MCO1，输出 HSE(25MHz) 供传感器工作 */
+#define OV5640_XCLK_PORT GPIOA
+#define OV5640_XCLK_PIN  GPIO_PIN_8
+#define OV5640_XCLK_AF   0U          /* AF0 = MCO1 */
 
 #define DCMI_D0_PORT    GPIOC
 #define DCMI_D0_PIN     GPIO_PIN_6
@@ -318,6 +336,26 @@ extern "C" {
  * 板上该脚有 10K 上拉；本实验只用 SWD 调试，所以 PA15 可以安全占用。 */
 #define OV5640_RST_PORT GPIOA
 #define OV5640_RST_PIN  GPIO_PIN_15
+
+/* --------------------------------------------------------------------------
+ * 摄像头 PWDN：官方《阿波罗V2 硬件参考手册》2.1.23 节原文：
+ *   "如果是 OLED 模块，则 DCMI_PWDN 和 DCMI_XCLK 不需要接（在板上靠左插即可），
+ *    如果是摄像头模块，则需要用到全部引脚。……DCMI_PWDN 则连接在 PCF8574
+ *    （IIC IO 扩展芯片）的 P2 引脚上。"
+ *
+ * PCF8574 挂在 PH4(SCL)/PH5(SDA) 这条 IIC 总线上（与 AP3216C/SH3001/ST480MC
+ * 共用）。《开发指南》第 37 章明确："开发板上 A0~A2 都是接 GND 的，所以
+ * PCF8574T 的地址为 0X40（左移了一位）"，且官方驱动开机先写 0xFF——
+ * "默认情况下所有 IO 输出高电平"。OV5640 的 PWDN 是高电平有效（高 = 掉电），
+ * 所以不先把 P2 清 0，摄像头会一直处于掉电态、SCCB 不会应答。
+ * -------------------------------------------------------------------------- */
+#define PCF8574_SCL_PORT  GPIOH
+#define PCF8574_SCL_PIN   GPIO_PIN_4
+#define PCF8574_SDA_PORT  GPIOH
+#define PCF8574_SDA_PIN   GPIO_PIN_5
+#define PCF8574_ADDR_W    0x40U   /* 7 位地址 0x20 的写形式 */
+#define PCF8574_ADDR_R    0x41U
+#define PCF8574_PWDN_BIT  0x04U   /* 位 2 = DCMI_PWDN */
 
 #ifdef __cplusplus
 }

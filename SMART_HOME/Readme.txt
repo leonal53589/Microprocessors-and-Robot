@@ -237,6 +237,12 @@ Src/
 tools/
     gen_font.py           字库生成脚本（构建时自动调用，见第三节第 7 条）
     ui_strings.txt        界面汉字的补充来源（源码扫描不到的字写在这里）
+    make_wiring.py        接线示意图生成器（PIL 绘制，输出到 tools/wiring/）
+    wiring/*.png          7 张接线示意图（总览/供电与DAP/RGB屏/摄像头/DHT11/RV1/按键）
+
+WIRING.txt                接线指南与引脚解析：哪个模块接到哪个接口、怎么插、
+                          上电顺序与故障排查、以及引脚推导方法与完整 AF 表
+                          ——【上电前先看这份】
 
 Drivers/                  STM32F4xx HAL 源码 + CMSIS（与实验一/二同一套）
 Startup/                  startup_stm32f429zitx.s

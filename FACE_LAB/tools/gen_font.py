@@ -189,7 +189,7 @@ def main():
         fp.write(fmt_array("lcd_cn_3232", cn_large))
 
         fp.write("\n\n/* 汉字索引（按 UTF-8 字节串匹配，便于直接写字面量） */\n")
-        fp.write("typedef struct { const char *utf8; uint16_t offset; } LcdCnItem;\n")
+        fp.write("typedef struct { const char *utf8; uint32_t offset; } LcdCnItem;\n")
         for name, idx, count in (("lcd_cn_index_small", idx_small, "LCD_CN_COUNT_SMALL"),
                                  ("lcd_cn_index_large", idx_large, "LCD_CN_COUNT_LARGE")):
             fp.write("const LcdCnItem %s[] = {\n" % name)

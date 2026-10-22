@@ -76,7 +76,8 @@
 #define CFG_KEY_PERIOD_MS       10U
 #define CFG_UI_PERIOD_MS        200U
 #define CFG_CAM_TIMEOUT_MS      400U
-#define CFG_CAM_FAIL_LIMIT      3U
+#define CFG_CAM_STALE_MS        5000U   /* 连续 5 秒无完整帧才停止重试 */
+#define CFG_CAM_BYTE_SWAP       1       /* 与实验三 RGB565 高字节先输出配置配套 */
 #define CFG_CAPTURE_TIMEOUT_MS  800U
 
 /* ==========================================================================

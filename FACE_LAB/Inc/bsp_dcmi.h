@@ -24,6 +24,36 @@ extern "C" {
 
 #include "main.h"
 
+/* Diagnostic codes shown as E<number> on LCD.
+ * Raw HAL status and register values remain in g_dcmi_diag for the debugger. */
+typedef enum {
+  BSP_DCMI_FAULT_NONE = 0,
+  BSP_DCMI_FAULT_ARGUMENT = 1,
+  BSP_DCMI_FAULT_STOP = 2,
+  BSP_DCMI_FAULT_START = 3,
+  BSP_DCMI_FAULT_DMA_START = 4,
+  BSP_DCMI_FAULT_SYNC = 10,
+  BSP_DCMI_FAULT_OVERRUN = 11,
+  BSP_DCMI_FAULT_DMA_TRANSFER = 20,
+  BSP_DCMI_FAULT_DMA_FIFO = 21,
+  BSP_DCMI_FAULT_DMA_DIRECT = 22,
+  BSP_DCMI_FAULT_DMA_OTHER = 23,
+  BSP_DCMI_FAULT_FRAME_TIMEOUT = 30
+} BSP_DCMI_Fault;
+
+typedef struct {
+  uint32_t starts, frames, faults, last_fault_tick;
+  uint32_t dcmi_error, dma_error, dcmi_risr, dcmi_misr, dma_ndtr;
+  uint32_t dcmi_state, dma_state;
+  uint32_t last_start_tick, last_frame_ms, max_frame_ms, timeouts;
+  uint8_t last_fault, active_error;
+  uint32_t polled_frames;  /* DMA complete + raw FRAME flag, IRQ callback missed */
+} BSP_DCMI_Diagnostics;
+
+extern volatile BSP_DCMI_Diagnostics g_dcmi_diag;
+void BSP_DCMI_RecordTimeout(void);
+uint8_t BSP_DCMI_LastFaultCode(void);
+
 /* 配置 DCMI 引脚（AF13）、DMA2_Stream1_Channel1、两个中断，返回 0 成功 */
 uint8_t BSP_DCMI_Init(void);
 

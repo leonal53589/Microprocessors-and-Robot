@@ -56,7 +56,7 @@
 /* #define HAL_I2C_MODULE_ENABLED */
 /* #define HAL_I2S_MODULE_ENABLED */
 /* #define HAL_IWDG_MODULE_ENABLED */
-#define HAL_LTDC_MODULE_ENABLED       /* 7 寸 800x480 RGB 屏 LTDC      */
+#define HAL_LTDC_MODULE_ENABLED       /* 7 寸 RGB 屏 LTDC(面板1024x600) */
 /* #define HAL_RNG_MODULE_ENABLED */
 /* #define HAL_RTC_MODULE_ENABLED */
 /* #define HAL_SAI_MODULE_ENABLED */

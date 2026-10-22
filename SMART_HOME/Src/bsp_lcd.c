@@ -1,12 +1,12 @@
 /**
   ******************************************************************************
   * @file    bsp_lcd.c
-  * @brief   7 寸 800x480 RGB 屏（LTDC）+ 绘图 / 文本 / 图像搬运
+  * @brief   7 寸 RGB 屏（面板 1024x600，界面 800x480 居中）+ 绘图 / 文本 / 图像搬运
   *
   *  硬件要点：
   *    1) 帧缓冲在外部 SDRAM（bsp_sdram.c 必须先初始化），LTDC 通过 FMC 读它；
-  *    2) LTDC 像素时钟由 PLLSAI 提供：HSE/PLLM=1MHz -> x240 = 240MHz VCO
-  *       -> /PLLSAIR(4) = 60MHz -> /PLLSAIDivR(2) = 30MHz；
+  *    2) LTDC 像素时钟由 PLLSAI 提供：HSE/PLLM=1MHz -> x360 = 360MHz VCO
+  *       -> /PLLSAIR(2) = 180MHz -> /PLLSAIDivR(4) = 45MHz（1024x600 面板）；
   *    3) 引脚用 AF14，面板时序参数集中在 pinmap.h（换屏只改那几个宏）；
   *    4) 背光 PB5 在 LTDC 跑起来之后再打开，避免上电白屏闪一下。
   *
@@ -61,7 +61,7 @@ static void lcd_gpio_init(void)
   /* LTDC 的 20 根信号线 */
   gpio.Mode      = GPIO_MODE_AF_PP;
   gpio.Pull      = GPIO_NOPULL;
-  gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;   /* 30MHz 像素时钟，必须高档 */
+  gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;   /* 45MHz 像素时钟，必须高档 */
   gpio.Alternate = LCD_AF;
 
   for (uint32_t i = 0U; i < (sizeof(s_ltdc_pins) / sizeof(s_ltdc_pins[0])); i++)
@@ -110,7 +110,7 @@ uint8_t BSP_LCD_Init(void)
 
   s_hltdc.Instance = LTDC;
   /* 面板极性：行/场同步低有效、DE 高有效、像素时钟上升沿采样
-   * （与所用 800x480 面板手册一致；换屏若花屏先查这四位） */
+   * （与所用 1024x600 面板手册一致；换屏若花屏先查这四位） */
   s_hltdc.Init.HSPolarity       = LTDC_HSPOLARITY_AL;
   s_hltdc.Init.VSPolarity       = LTDC_VSPOLARITY_AL;
   s_hltdc.Init.DEPolarity       = LTDC_DEPOLARITY_AL;
@@ -120,10 +120,10 @@ uint8_t BSP_LCD_Init(void)
   s_hltdc.Init.VerticalSync       = LCD_VSW - 1U;
   s_hltdc.Init.AccumulatedHBP     = LCD_HSW + LCD_HBP - 1U;
   s_hltdc.Init.AccumulatedVBP     = LCD_VSW + LCD_VBP - 1U;
-  s_hltdc.Init.AccumulatedActiveW = LCD_HSW + LCD_HBP + LCD_WIDTH - 1U;
-  s_hltdc.Init.AccumulatedActiveH = LCD_VSW + LCD_VBP + LCD_HEIGHT - 1U;
-  s_hltdc.Init.TotalWidth         = LCD_HSW + LCD_HBP + LCD_WIDTH + LCD_HFP - 1U;
-  s_hltdc.Init.TotalHeigh         = LCD_VSW + LCD_VBP + LCD_HEIGHT + LCD_VFP - 1U;
+  s_hltdc.Init.AccumulatedActiveW = LCD_HSW + LCD_HBP + LCD_PANEL_W - 1U;
+  s_hltdc.Init.AccumulatedActiveH = LCD_VSW + LCD_VBP + LCD_PANEL_H - 1U;
+  s_hltdc.Init.TotalWidth         = LCD_HSW + LCD_HBP + LCD_PANEL_W + LCD_HFP - 1U;
+  s_hltdc.Init.TotalHeigh         = LCD_VSW + LCD_VBP + LCD_PANEL_H + LCD_VFP - 1U;
   s_hltdc.Init.Backcolor.Red      = 0U;
   s_hltdc.Init.Backcolor.Green    = 0U;
   s_hltdc.Init.Backcolor.Blue     = 0U;
@@ -134,10 +134,11 @@ uint8_t BSP_LCD_Init(void)
   }
 
   /* 第 1 层铺满整屏，RGB565，帧缓冲指向 SDRAM */
-  layer.WindowX0       = 0U;
-  layer.WindowX1       = LCD_WIDTH - 1U;
-  layer.WindowY0       = 0U;
-  layer.WindowY1       = LCD_HEIGHT - 1U;
+  /* 面板原生 1024x600，界面按 800x480 绘制：窗口居中放置，四周留黑边 */
+  layer.WindowX0       = LCD_WIN_X0;
+  layer.WindowX1       = LCD_WIN_X1;
+  layer.WindowY0       = LCD_WIN_Y0;
+  layer.WindowY1       = LCD_WIN_Y1;
   layer.PixelFormat    = LTDC_PIXEL_FORMAT_RGB565;
   layer.Alpha          = 255U;
   layer.Alpha0         = 0U;

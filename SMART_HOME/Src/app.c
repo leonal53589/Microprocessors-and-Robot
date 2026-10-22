@@ -115,7 +115,9 @@ typedef struct
   uint8_t      cam_ready;          /* OV5640 初始化成功 */
   uint8_t      cam_fail_count;
   uint8_t      cam_streaming;
+  uint8_t      cam_has_frame;      /* 收到完整帧后才显示预览正常 */
   uint32_t     cam_last_start_ms;
+  uint32_t     cam_last_good_ms;
   uint32_t     cam_fps;            /* 最近一次的近似帧率 x10 */
 
   /* 页面与调度 */
@@ -132,6 +134,8 @@ typedef struct
 } AppState;
 
 static AppState s_app;
+static uint8_t s_dcmi_ready;
+static const char *s_cam_error = "尚未初始化，按 K1 重试";
 
 /* 摄像头帧缓冲放在 SDRAM（见 pinmap.h 的地址分配） */
 static uint16_t *s_cam_buf = (uint16_t *)CAM_FB_ADDR;
@@ -144,7 +148,7 @@ static int32_t    s_shown_raw = -1;
 static uint8_t    s_shown_alarm = 0xFFU;
 static uint8_t    s_shown_dht_ok = 0xFFU;
 static uint8_t    s_shown_cam_ok = 0xFFU;
-static uint8_t    s_shown_cam_fail = 0xFFU;
+static uint8_t    s_shown_cam_status = 0xFFU;
 static int32_t    s_shown_fps = -1;
 static uint8_t    s_shown_page = 0xFFU;
 static uint8_t    s_shown_temp_over = 0xFFU;
@@ -260,7 +264,7 @@ static void ui_home_static(void)
   s_shown_alarm = 0xFFU;
   s_shown_dht_ok = 0xFFU;
   s_shown_cam_ok = 0xFFU;
-  s_shown_cam_fail = 0xFFU;
+  s_shown_cam_status = 0xFFU;
   s_shown_temp_over = 0xFFU;
   s_shown_humi_over = 0xFFU;
   s_shown_volt_over = 0xFFU;
@@ -532,24 +536,35 @@ static void ui_camera_static(void)
   s_shown_humi = -1000;
   s_shown_volt = -1000;
   s_shown_alarm = 0xFFU;
-  s_shown_cam_fail = 0xFFU;
+  s_shown_cam_status = 0xFFU;
   s_shown_fps = -1;
+  s_shown_cam_ok = 0xFFU;
 }
 
 /* 预览区中间画提示（初始化失败 / 启动中） */
 static void ui_camera_message(const char *line1, const char *line2, uint16_t color)
 {
+  uint16_t width = LCD_FontTextWidth(line1, LCD_FONT_LARGE);
+  uint16_t x = (width < CAM_VIEW_W) ? (uint16_t)((CAM_VIEW_W - width) / 2U) : 0U;
   BSP_LCD_FillRect(0U, 170U, CAM_VIEW_W, 140U, COLOR_BG);
-  BSP_LCD_DrawStringCentered(200U, line1, color, COLOR_BG, LCD_FONT_LARGE);
+  BSP_LCD_DrawString(x, 200U, line1, color, COLOR_BG, LCD_FONT_LARGE);
   if (line2 != NULL)
   {
-    BSP_LCD_DrawStringCentered(250U, line2, COLOR_LABEL, COLOR_BG, LCD_FONT_SMALL);
+    width = LCD_FontTextWidth(line2, LCD_FONT_SMALL);
+    x = (width < CAM_VIEW_W) ? (uint16_t)((CAM_VIEW_W - width) / 2U) : 0U;
+    BSP_LCD_DrawString(x, 250U, line2, COLOR_LABEL, COLOR_BG, LCD_FONT_SMALL);
   }
 }
 
 static void ui_camera_side(void)
 {
   uint16_t x = CAM_SIDE_X + 8U;
+  uint8_t preview_status = 2U;  /* 0 waiting, 1 healthy, 2 stale/fault */
+  if (s_app.cam_ready != 0U)
+  {
+    preview_status = (s_app.cam_has_frame == 0U) ? 0U :
+      (((HAL_GetTick() - s_app.cam_last_good_ms) < CFG_CAM_STATUS_STALE_MS) ? 1U : 2U);
+  }
 
   /* 温度 */
   if ((s_app.dht_valid ? (int32_t)s_app.dht.temperature : -1000) != s_shown_temp)
@@ -614,15 +629,20 @@ static void ui_camera_side(void)
                        COLOR_TOP, LCD_FONT_SMALL);
   }
 
-  /* 摄像头状态与帧率 */
-  if ((s_app.cam_fail_count != s_shown_cam_fail) || ((int32_t)s_app.cam_fps != s_shown_fps))
+  /* A dropped frame is recorded in diagnostics. The displayed preview is
+   * healthy while complete frames still arrive within the recent window. */
+  if ((preview_status != s_shown_cam_status) || ((int32_t)s_app.cam_fps != s_shown_fps))
   {
-    s_shown_cam_fail = s_app.cam_fail_count;
+    s_shown_cam_status = preview_status;
     s_shown_fps = (int32_t)s_app.cam_fps;
     BSP_LCD_FillRect(x, 360U, CAM_SIDE_W - 16U, 30U, COLOR_TOP);
-    if (s_app.cam_fail_count == 0U)
+    if (preview_status == 1U)
     {
       BSP_LCD_DrawString(x, 364U, "预览正常", COLOR_OK, COLOR_TOP, LCD_FONT_SMALL);
+    }
+    else if (preview_status == 0U)
+    {
+      BSP_LCD_DrawString(x, 364U, "等待画面", COLOR_LABEL, COLOR_TOP, LCD_FONT_SMALL);
     }
     else
     {
@@ -787,28 +807,62 @@ static void app_cam_start_frame(void)
   else
   {
     s_app.cam_streaming = 0U;
+    s_app.cam_ready = 0U;
+    s_cam_error = "DCMI/DMA 启动失败，按 K1 重试";
     if (s_app.cam_fail_count < 0xFFU)
     {
       s_app.cam_fail_count++;
     }
+    ui_camera_message("摄像头采集失败", s_cam_error, COLOR_FAULT);
+    BSP_LCD_DrawString(270U, 285U, "E", COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
+    BSP_LCD_DrawInt(290U, 285U, BSP_DCMI_LastFaultCode(), COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
   }
 }
 
 static void app_cam_init_once(void)
 {
-  OV5640_Status st = OV5640_Init();
+  OV5640_Status st;
+  s_app.cam_has_frame = 0U;
+
+  if (s_dcmi_ready == 0U)
+  {
+    s_dcmi_ready = (BSP_DCMI_Init() == 0U) ? 1U : 0U;
+    if (s_dcmi_ready == 0U)
+    {
+      s_app.cam_ready = 0U;
+      s_cam_error = "DCMI 初始化失败，按 K1 重试";
+      return;
+    }
+  }
+  st = OV5640_Init();
 
   if (st == OV5640_OK)
   {
     s_app.cam_ready = 1U;
     s_app.cam_fail_count = 0U;
     s_app.cam_streaming = 0U;
-    app_cam_start_frame();
+    /* 页面入口统一启动一次，避免刚启动就被重复停止。 */
   }
   else
   {
     s_app.cam_ready = 0U;
     s_app.cam_streaming = 0U;
+    if (st == OV5640_ERR_SCCB)
+    {
+      s_cam_error = "SCCB 无应答，按 K1 重试";
+    }
+    else if (st == OV5640_ERR_ID)
+    {
+      s_cam_error = "摄像头 ID 不符，按 K1 重试";
+    }
+    else if (st == OV5640_ERR_VERIFY)
+    {
+      s_cam_error = "寄存器校验失败，按 K1 重试";
+    }
+    else
+    {
+      s_cam_error = "摄像头配置失败，按 K1 重试";
+    }
   }
 }
 
@@ -824,7 +878,7 @@ static void task_camera(uint32_t now)
     return;                                   /* 静态提示已经画过 */
   }
 
-  if (BSP_DCMI_TakeFrame() != 0U)
+  if ((BSP_DCMI_HasError() == 0U) && (BSP_DCMI_TakeFrame() != 0U))
   {
     /* 一帧搬完：先按需做字节交换，再 2 倍放大贴到左侧预览区 */
 #if CFG_CAM_BYTE_SWAP
@@ -833,6 +887,8 @@ static void task_camera(uint32_t now)
     BSP_LCD_BlitRGB565x2(0U, 0U, OV5640_WIDTH, OV5640_HEIGHT, s_cam_buf);
 
     s_app.cam_fail_count = 0U;
+    s_app.cam_has_frame = 1U;
+    s_app.cam_last_good_ms = now;
     s_app.fps_frames++;
 
     /* 每秒统计一次帧率（x10 保存，显示时除以 10） */
@@ -847,9 +903,10 @@ static void task_camera(uint32_t now)
     return;
   }
 
-  /* 超时：说明摄像头没在输出（线没插好 / PCLK 没来） */
+  /* 采集错误或超时：不能仅凭超时断言硬件没有信号。 */
   if ((s_app.cam_streaming != 0U) &&
-      ((now - s_app.cam_last_start_ms) > CFG_CAM_TIMEOUT_MS))
+      ((BSP_DCMI_HasError() != 0U) ||
+       ((now - s_app.cam_last_start_ms) > CFG_CAM_TIMEOUT_MS)))
   {
     s_app.cam_streaming = 0U;
     if (s_app.cam_fail_count < 0xFFU)
@@ -857,16 +914,25 @@ static void task_camera(uint32_t now)
       s_app.cam_fail_count++;
     }
 
-    if ((BSP_DCMI_HasError() != 0U) || (s_app.cam_fail_count >= CFG_CAM_FAIL_LIMIT))
+    if (BSP_DCMI_HasError() == 0U) { BSP_DCMI_RecordTimeout(); }
+    if ((now - s_app.cam_last_good_ms) >= CFG_CAM_STALE_MS)
     {
+      s_cam_error = (BSP_DCMI_LastFaultCode() == BSP_DCMI_FAULT_FRAME_TIMEOUT)
+                    ? "等待完整帧超时，按 K1 重试"
+                    : "DCMI/DMA 采集错误，按 K1 重试";
       BSP_DCMI_Stop();
       BSP_DCMI_ClearError();
       s_app.cam_ready = 0U;
-      ui_camera_message("摄像头无信号", "请检查 P6 连接后按 K1 重新初始化", COLOR_FAULT);
+      ui_camera_message("摄像头采集失败", s_cam_error, COLOR_FAULT);
+      BSP_LCD_DrawString(270U, 285U, "E", COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
+      BSP_LCD_DrawInt(290U, 285U, BSP_DCMI_LastFaultCode(), COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
     }
     else
     {
-      app_cam_start_frame();                  /* 再试一帧 */
+      /* Discard the incomplete frame and retry; never display a partial buffer. */
+      BSP_DCMI_Stop();
+      BSP_DCMI_ClearError();
+      app_cam_start_frame();
     }
   }
 }
@@ -879,6 +945,8 @@ static void app_page_enter(PageId page)
 
   if (page == PAGE_CAMERA)
   {
+    s_app.cam_has_frame = 0U;
+    s_app.cam_last_good_ms = HAL_GetTick();
     ui_camera_static();
 
     if (s_app.cam_ready == 0U)
@@ -896,12 +964,13 @@ static void app_page_enter(PageId page)
     }
     else
     {
-      ui_camera_message("摄像头初始化失败", "请检查 P6 连接后按 K1 重新初始化", COLOR_FAULT);
+      ui_camera_message("摄像头初始化失败", s_cam_error, COLOR_FAULT);
     }
   }
   else
   {
-    BSP_DCMI_Stop();
+    if (s_dcmi_ready != 0U) { BSP_DCMI_Stop(); }
+    s_app.cam_streaming = 0U;
     ui_home_static();
     ui_home_refresh();
   }
@@ -929,21 +998,22 @@ static void task_key(uint32_t now)
       if (s_app.page == PAGE_CAMERA)
       {
         /* 重新初始化摄像头：先停采集，再重走一遍 OV5640_Init */
-        BSP_DCMI_Stop();
+        if (s_dcmi_ready != 0U) { BSP_DCMI_Stop(); }
         s_app.cam_ready = 0U;
         s_app.cam_fail_count = 0U;
+        s_app.cam_last_good_ms = HAL_GetTick();
         ui_camera_message("摄像头初始化中", "OV5640 @ P6 (DCMI)", COLOR_LABEL);
         app_cam_init_once();
         if (s_app.cam_ready != 0U)
         {
           ui_camera_static();
-          s_app.t_fps = now;
+          s_app.t_fps = HAL_GetTick();
           s_app.fps_frames = 0U;
           app_cam_start_frame();
         }
         else
         {
-          ui_camera_message("摄像头初始化失败", "请检查 P6 连接后按 K1 重新初始化", COLOR_FAULT);
+          ui_camera_message("摄像头初始化失败", s_cam_error, COLOR_FAULT);
         }
       }
       break;
@@ -1035,7 +1105,8 @@ void App_Init(void)
     BSP_LCD_DrawStringCentered(320U, "ADC 初始化失败", COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
   }
 
-  if (BSP_DCMI_Init() != 0U)
+  s_dcmi_ready = (BSP_DCMI_Init() == 0U) ? 1U : 0U;
+  if (s_dcmi_ready == 0U)
   {
     BSP_LCD_DrawStringCentered(350U, "DCMI 初始化失败", COLOR_FAULT, COLOR_BG, LCD_FONT_SMALL);
   }
@@ -1096,5 +1167,7 @@ void App_Task(void)
   }
 
   /* 摄像头 */
-  task_camera(now);
+  /* 按键可能执行数百毫秒的初始化，必须重取时钟。
+   * 旧 now 早于 cam_last_start_ms，无符号相减会误判为超长超时。 */
+  task_camera(HAL_GetTick());
 }

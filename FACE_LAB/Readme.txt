@@ -138,6 +138,12 @@
     Inc/algo_pca.h      PCA 模型与接口
     tools/gen_font.py   字库生成器（构建时自动跑，改了界面文字不用手工维护）
     tools/ui_strings.txt 界面汉字补充来源
+    tools/make_wiring.py 接线示意图生成器（PIL 绘制，输出到 tools/wiring/）
+    tools/wiring/*.png  6 张接线示意图（总览/供电与DAP/RGB屏/摄像头/按键/SPI Flash）
+    WIRING.txt          接线指南与引脚解析：接到哪个接口、怎么插、上电顺序、
+                        故障排查、引脚推导方法与完整 AF 表 ——【上电前先看这份】
+    TEST_PLAN.txt       验收步骤与记录表（7 个验收项 + 参数速查 + 问题排查，
+                        每项含 操作/期望现象/判定勾选/记录栏）
     Makefile            make all / make clean
 
 ----------------------------------------------------------------

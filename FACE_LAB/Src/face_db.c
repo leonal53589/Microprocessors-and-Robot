@@ -58,7 +58,7 @@ static void pack_header(uint8_t *h, uint8_t person, uint8_t slot, uint32_t ts)
   h[4] = FACE_FLASH_VERSION;
   h[5] = person;
   h[6] = slot;
-  h[7] = 0U;
+  h[7] = FACE_FLASH_FLAG_RGB565;
   put_u32(&h[8], ts);
 }
 
@@ -155,10 +155,10 @@ static uint8_t rec_write(uint8_t slot, uint8_t person, uint8_t person_slot,
   uint8_t  hdr[12];
   uint32_t addr = slot_flash_addr(slot);
   uint32_t crc;
-  uint8_t  rd[12];
+  uint8_t  rd[64];
 
   pack_header(hdr, person, person_slot, ts);
-  crc = ~crc32_step(0xFFFFFFFFU, hdr, sizeof(hdr));
+  crc = crc32_step(0xFFFFFFFFU, hdr, sizeof(hdr));
   crc = crc32_step(crc, (const uint8_t *)img->rgb565, sizeof(img->rgb565));
   crc = crc32_step(crc, img->gray, sizeof(img->gray));
 
@@ -193,14 +193,21 @@ static uint8_t rec_write(uint8_t slot, uint8_t person, uint8_t person_slot,
     }
   }
 
-  /* ---- 回读校验：头部 magic 必须对 ---- */
-  if (W25Q_Read(addr, rd, sizeof(rd)) != W25Q_OK)
+  /* 分块回读整条记录，验证 RGB/灰度/头部的 CRC，避免只核对 magic 就报成功。
+   * 只用 64B 栈空间，不分配第二张人脸图。 */
   {
-    return 7U;
-  }
-  if (get_u32(&rd[0]) != FACE_FLASH_MAGIC_REC)
-  {
-    return 8U;
+    uint32_t stored_crc = ~crc;
+    uint32_t verify_crc = 0xFFFFFFFFU;
+    uint32_t payload_bytes = 12U + sizeof(img->rgb565) + sizeof(img->gray);
+    for (uint32_t offset = 0U; offset < payload_bytes; offset += sizeof(rd))
+    {
+      uint32_t n = payload_bytes - offset;
+      if (n > sizeof(rd)) { n = sizeof(rd); }
+      if (W25Q_Read(addr + offset, rd, n) != W25Q_OK) { return 7U; }
+      verify_crc = crc32_step(verify_crc, rd, n);
+    }
+    if (W25Q_Read(addr + payload_bytes, rd, 4U) != W25Q_OK) { return 7U; }
+    if ((~verify_crc != stored_crc) || (get_u32(rd) != stored_crc)) { return 8U; }
   }
   return 0U;
 }
@@ -221,7 +228,8 @@ static uint8_t rec_read(uint8_t slot, FaceRecord *rec)
   {
     return 2U;                        /* 空槽 */
   }
-  if ((hdr[4] != FACE_FLASH_VERSION) || (hdr[5] < 1U) || (hdr[5] > CFG_PERSON_COUNT))
+  if ((hdr[4] != FACE_FLASH_VERSION) || (hdr[5] < 1U) || (hdr[5] > CFG_PERSON_COUNT) ||
+      (hdr[6] >= CFG_SLOTS_PER_PERSON) || ((hdr[7] & ~FACE_FLASH_FLAG_RGB565) != 0U))
   {
     return 3U;
   }
@@ -240,7 +248,8 @@ static uint8_t rec_read(uint8_t slot, FaceRecord *rec)
   }
 
   /* 逐字节重算 CRC，和数据比对 */
-  crc = ~crc32_step(0xFFFFFFFFU, hdr, sizeof(hdr));
+  crc = crc32_step(0xFFFFFFFFU, hdr, sizeof(hdr));
+  if (hdr[7] == 0U) { crc = ~crc; }  /* 兼容旧版在头部后提前取反的 CRC 算法。 */
   crc = crc32_step(crc, (const uint8_t *)rec->img.rgb565, sizeof(rec->img.rgb565));
   crc = crc32_step(crc, rec->img.gray, sizeof(rec->img.gray));
   crc = ~crc;
@@ -254,7 +263,14 @@ static uint8_t rec_read(uint8_t slot, FaceRecord *rec)
   rec->slot       = hdr[6];
   rec->from_flash = 1U;
   rec->timestamp  = get_u32(&hdr[8]);
-  rec->crc        = crc;
+  if (hdr[7] == 0U)
+  {
+    /* 原工程未在 DMA 完成后交换字节，旧图库同时保存了错色 RGB 和错误灰度。
+     * 先验证原始记录完整性，再转成当前统一格式；保留 Flash 原数据不自动重写。 */
+    Image_RGB565SwapBytes(rec->img.rgb565, FACE_PIXELS);
+    Image_ToGray(&rec->img);
+  }
+  rec->crc = FaceDb_RecordCrc(&rec->img, rec->person, rec->slot, rec->timestamp);
   rec->img.quality = IMG_OK;
   return 0U;
 }

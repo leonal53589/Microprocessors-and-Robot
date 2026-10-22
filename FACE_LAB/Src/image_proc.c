@@ -39,6 +39,16 @@ static uint8_t rgb565_blue(uint16_t c)
  * 预处理
  * ========================================================================== */
 
+void Image_RGB565SwapBytes(uint16_t *pixels, uint32_t count)
+{
+  if (pixels == NULL) { return; }
+  for (uint32_t i = 0U; i < count; i++)
+  {
+    uint16_t v = pixels[i];
+    pixels[i] = (uint16_t)((v >> 8) | (v << 8));
+  }
+}
+
 /**
   * @brief  从整幅帧里按取景框裁剪，并最近邻缩放成 48x48
   * @note   采样点取每个目标像素对应源区域的中心，避免整体偏移半格
